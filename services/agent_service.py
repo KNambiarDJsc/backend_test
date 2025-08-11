@@ -1,3 +1,4 @@
+# services/agent_service.py - Updated with Custom Runner Integration
 from typing import List, Dict, Any, Optional
 import structlog
 from supabase import Client
@@ -28,56 +29,171 @@ from config.settings import settings
 logger = structlog.get_logger(__name__)
 
 class AgentService:
-    """Service for handling AI agent interactions using ADK."""
+    """Service for handling AI agent interactions using ADK with custom runner."""
     
     def __init__(self, supabase_client: Client):
         self.supabase = supabase_client
         self.logger = logger.bind(service="agent")
-        self.runner = None
+        self.custom_runner = None
         
         if ADK_AVAILABLE:
-            self._setup_adk_components()
+            self._setup_custom_runner()
         else:
             self.logger.warning("ADK not available, using fallback implementation")
     
-    def _setup_adk_components(self):
-        """Initialize ADK components."""
+    def _setup_custom_runner(self):
+        """Initialize custom runner with Supabase integration."""
         try:
+            # Import custom runner
+            from runner.custom_runner import CustomAgentRunner
             from chat_agent.agent import root_agent
             
-            # Create proper database URL for Supabase
-            db_url = self._create_supabase_db_url()
-            if db_url:
-                self.session_service = DatabaseSessionService(db_url=db_url)
-                self.runner = Runner(
-                    agent=root_agent,
-                    app_name=settings.adk_app_name,
-                    session_service=self.session_service
-                )
-                self.logger.info("ADK components initialized successfully")
-            else:
-                self.logger.warning("Could not create database URL, using fallback")
-                self.runner = None
+            self.custom_runner = CustomAgentRunner(
+                agent=root_agent,
+                supabase_client=self.supabase,
+                app_name=settings.adk_app_name
+            )
+            self.logger.info("Custom runner initialized successfully")
+            
         except Exception as e:
-            self.logger.error("Failed to setup ADK components", error=str(e))
-            self.runner = None
-    
-    def _create_supabase_db_url(self) -> Optional[str]:
-        """Create PostgreSQL URL from Supabase settings."""
-        try:
-            # For production, you'd need actual DB credentials
-            # For now, returning None to use fallback
-            return None
-        except Exception as e:
-            self.logger.error("Error creating database URL", error=str(e))
-            return None
+            self.logger.error("Failed to setup custom runner", error=str(e))
+            self.custom_runner = None
     
     async def create_session(self, user_profile: UserProfile, metadata: Dict[str, Any] = None) -> str:
-        """Create a new chat session."""
+        """Create a new chat session using custom runner."""
         session_id = str(uuid.uuid4())
         
         try:
-            # Store session in Supabase
+            if self.custom_runner:
+                # Use custom runner's session service
+                session_id = await self.custom_runner.session_service.create_session(
+                    user_id=user_profile.id,
+                    session_id=session_id,
+                    initial_state=self._create_initial_state(user_profile)
+                )
+                self.logger.info("Session created with custom runner", 
+                               session_id=session_id, 
+                               user_id=user_profile.id)
+            else:
+                # Fallback to manual session creation
+                session_id = await self._create_manual_session(user_profile, metadata, session_id)
+            
+            return session_id
+            
+        except Exception as e:
+            self.logger.error("Session creation failed", error=str(e), user_id=user_profile.id)
+            # Return session ID anyway for testing
+            return session_id
+    
+    async def process_user_query(
+        self,
+        user_profile: UserProfile,
+        session_id: str,
+        user_message: str,
+        metadata: Dict[str, Any] = None
+    ) -> str:
+        """Process user query using custom runner or fallback."""
+        try:
+            if self.custom_runner:
+                # Use custom runner for full agent pipeline
+                response = await self.custom_runner.run_conversation(
+                    user_id=user_profile.id,
+                    session_id=session_id,
+                    user_message=user_message,
+                    message_metadata=metadata
+                )
+                
+                self.logger.info("Message processed with custom runner", 
+                               session_id=session_id,
+                               user_id=user_profile.id,
+                               response_length=len(response))
+                return response
+            else:
+                # Fallback processing
+                return await self._process_with_fallback(user_profile, session_id, user_message)
+            
+        except Exception as e:
+            self.logger.error("Failed to process user query", error=str(e))
+            return "I apologize, but I'm having trouble processing your message right now. Please try again."
+
+    async def get_session_state(self, user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get current session state."""
+        try:
+            if self.custom_runner:
+                return await self.custom_runner.session_service.get_session(user_id, session_id)
+            else:
+                # Fallback: get from Supabase directly
+                result = self.supabase.table('chat_sessions') \
+                    .select('state') \
+                    .eq('id', session_id) \
+                    .eq('user_id', user_id) \
+                    .execute()
+                
+                if result.data:
+                    return result.data[0]['state']
+                return None
+                
+        except Exception as e:
+            self.logger.error("Failed to get session state", error=str(e))
+            return None
+
+    async def session_exists(self, user_id: str, session_id: str) -> bool:
+        """Check if session exists and belongs to user."""
+        try:
+            if self.custom_runner:
+                session = await self.custom_runner.session_service.get_session(user_id, session_id)
+                return session is not None
+            else:
+                # Fallback: check Supabase directly
+                result = self.supabase.table('chat_sessions') \
+                    .select('id') \
+                    .eq('id', session_id) \
+                    .eq('user_id', user_id) \
+                    .execute()
+                
+                return len(result.data) > 0
+                
+        except Exception as e:
+            self.logger.error("Error checking session existence", error=str(e))
+            return False
+
+    async def delete_session(self, user_id: str, session_id: str) -> bool:
+        """Delete session and all associated data."""
+        try:
+            if self.custom_runner:
+                return await self.custom_runner.session_service.delete_session(user_id, session_id)
+            else:
+                # Fallback: manual deletion
+                return await self._delete_manual_session(user_id, session_id)
+                
+        except Exception as e:
+            self.logger.error("Failed to delete session", error=str(e))
+            return False
+
+    async def get_user_sessions(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get all sessions for a user."""
+        try:
+            result = self.supabase.table('chat_sessions') \
+                .select('id, created_at, updated_at, metadata') \
+                .eq('user_id', user_id) \
+                .eq('app_name', settings.adk_app_name) \
+                .order('created_at', desc=True) \
+                .limit(limit) \
+                .execute()
+            
+            return result.data
+            
+        except Exception as e:
+            self.logger.error("Error retrieving user sessions", error=str(e))
+            return []
+
+    # =====================================================
+    # FALLBACK METHODS (when ADK/custom runner unavailable)
+    # =====================================================
+
+    async def _create_manual_session(self, user_profile: UserProfile, metadata: Dict[str, Any], session_id: str) -> str:
+        """Fallback session creation without custom runner."""
+        try:
             session_data = {
                 "id": session_id,
                 "user_id": user_profile.id,
@@ -91,32 +207,39 @@ class AgentService:
             result = self.supabase.table('chat_sessions').insert(session_data).execute()
             
             if result.data:
-                self.logger.info("Session created successfully", session_id=session_id, user_id=user_profile.id)
+                self.logger.info("Manual session created", session_id=session_id)
                 return session_id
             else:
                 raise Exception("Failed to create session in database")
                 
         except Exception as e:
-            self.logger.error("Session creation failed", error=str(e), user_id=user_profile.id)
-            # Return session ID anyway for testing
-            return session_id
-    
-    async def process_user_query(
-        self,
-        user_profile: UserProfile,
-        session_id: str,
-        user_message: str,
-        metadata: Dict[str, Any] = None
-    ) -> str:
-        """Process user query."""
+            self.logger.error("Manual session creation failed", error=str(e))
+            raise
+
+    async def _process_with_fallback(self, user_profile: UserProfile, session_id: str, user_message: str) -> str:
+        """Fallback message processing without custom runner."""
         try:
             # Store user message
             await self._store_message(session_id, user_profile.id, "user", user_message)
             
-            if self.runner and ADK_AVAILABLE:
-                response = await self._process_with_adk(user_profile, session_id, user_message)
+            # Simple rule-based response
+            message_lower = user_message.lower()
+            
+            # Risk detection
+            risk_keywords = ["hurt myself", "harm myself", "suicide", "kill myself", "want to die"]
+            if any(keyword in message_lower for keyword in risk_keywords):
+                await self._create_risk_alert(user_profile, session_id, user_message, "Suicidality")
+                response = ("Thank you for sharing that with me. That sounds like a lot to hold onto, and it's really important. "
+                           "I want you to know that you're not alone. Please reach out to a trusted adult or call 988 if you need immediate help.")
+            # Basic responses
+            elif any(greeting in message_lower for greeting in ["hello", "hi", "hey"]):
+                response = "Hello! I'm here to support you. How are you feeling today?"
+            elif any(feeling in message_lower for feeling in ["sad", "down", "upset", "depressed"]):
+                response = "I hear that you're feeling down. That must be difficult. Can you tell me more about what's been going on?"
+            elif any(word in message_lower for word in ["anxious", "worried", "stress"]):
+                response = "It sounds like you're feeling anxious or stressed. That can be really overwhelming. What's been on your mind lately?"
             else:
-                response = await self._process_with_fallback(user_profile, session_id, user_message)
+                response = "Thank you for sharing that with me. I'm here to listen and support you. Can you tell me more about how you're feeling?"
             
             # Store agent response
             await self._store_message(session_id, user_profile.id, "assistant", response)
@@ -130,73 +253,54 @@ class AgentService:
             return response
             
         except Exception as e:
-            self.logger.error("Failed to process user query", error=str(e))
-            return "I apologize, but I'm having trouble processing your message right now. Please try again."
+            self.logger.error("Fallback processing failed", error=str(e))
+            return "I'm here to help you. Can you tell me more about what you're experiencing?"
 
-    async def _process_with_adk(self, user_profile: UserProfile, session_id: str, user_message: str) -> str:
-        """Process message using ADK Runner."""
+    async def _delete_manual_session(self, user_id: str, session_id: str) -> bool:
+        """Manual session deletion."""
         try:
-            user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
+            # Delete related data first
+            self.supabase.table('chat_messages') \
+                .delete() \
+                .eq('session_id', session_id) \
+                .eq('user_id', user_id) \
+                .execute()
             
-            response_events: List[Event] = []
-            async for event in self.runner.run_async(
-                user_id=user_profile.id,
-                session_id=session_id,
-                new_message=user_content
-            ):
-                response_events.append(event)
+            self.supabase.table('session_states') \
+                .delete() \
+                .eq('session_id', session_id) \
+                .eq('user_id', user_id) \
+                .execute()
             
-            final_response = self._extract_final_response(response_events)
-            if not final_response:
-                final_response = "I'm here to help. Can you tell me more about what you're experiencing?"
+            self.supabase.table('transformed_messages') \
+                .delete() \
+                .eq('session_id', session_id) \
+                .eq('user_id', user_id) \
+                .execute()
             
-            self.logger.info("ADK processing completed", 
-                              user_id=user_profile.id, 
-                              session_id=session_id,
-                              response_length=len(final_response))
-            return final_response
+            self.supabase.table('risk_alerts') \
+                .delete() \
+                .eq('session_id', session_id) \
+                .eq('user_id', user_id) \
+                .execute()
+            
+            # Delete session
+            result = self.supabase.table('chat_sessions') \
+                .delete() \
+                .eq('id', session_id) \
+                .eq('user_id', user_id) \
+                .execute()
+            
+            self.logger.info("Manual session deleted", session_id=session_id, user_id=user_id)
+            return True
             
         except Exception as e:
-            self.logger.error("ADK processing failed", error=str(e))
-            return await self._process_with_fallback(user_profile, session_id, user_message)
+            self.logger.error("Manual session deletion failed", error=str(e))
+            return False
 
-    def _extract_final_response(self, events: List[Event]) -> str:
-        """Extract the final agent response from ADK events."""
-        final_response_text = ""
-        for event in reversed(events):
-            try:
-                if hasattr(event, 'is_final_response') and event.is_final_response():
-                    if hasattr(event, 'content') and event.content:
-                        parts = getattr(event.content, 'parts', [])
-                        text_parts = [part.text for part in parts if hasattr(part, 'text') and part.text]
-                        if text_parts:
-                            final_response_text = "".join(text_parts)
-                            break
-            except Exception as e:
-                self.logger.debug("Error extracting text from event", error=str(e))
-                continue
-        return final_response_text.strip() if final_response_text else ""
-
-    async def _process_with_fallback(self, user_profile: UserProfile, session_id: str, user_message: str) -> str:
-        """Fallback message processing without ADK."""
-        message_lower = user_message.lower()
-        
-        # Risk detection
-        risk_keywords = ["hurt myself", "harm myself", "suicide", "kill myself", "want to die"]
-        if any(keyword in message_lower for keyword in risk_keywords):
-            await self._create_risk_alert(user_profile, session_id, user_message, "Suicidality")
-            return ("Thank you for sharing that with me. That sounds like a lot to hold onto, and it's really important. "
-                    "I want you to know that you're not alone. Please reach out to a trusted adult or call 988 if you need immediate help.")
-        
-        # Basic responses
-        if any(greeting in message_lower for greeting in ["hello", "hi", "hey"]):
-            return "Hello! I'm here to support you. How are you feeling today?"
-        elif any(feeling in message_lower for feeling in ["sad", "down", "upset", "depressed"]):
-            return "I hear that you're feeling down. That must be difficult. Can you tell me more about what's been going on?"
-        elif any(word in message_lower for word in ["anxious", "worried", "stress"]):
-            return "It sounds like you're feeling anxious or stressed. That can be really overwhelming. What's been on your mind lately?"
-        else:
-            return "Thank you for sharing that with me. I'm here to listen and support you. Can you tell me more about how you're feeling?"
+    # =====================================================
+    # HELPER METHODS
+    # =====================================================
 
     async def _store_message(self, session_id: str, user_id: str, role: str, content: str):
         """Store message in Supabase."""
@@ -219,7 +323,12 @@ class AgentService:
     async def _update_session_state(self, session_id: str, user_id: str, updates: Dict[str, Any]):
         """Update session state in Supabase."""
         try:
-            self.supabase.table('chat_sessions').update(updates).eq('id', session_id).eq('user_id', user_id).execute()
+            self.supabase.table('chat_sessions') \
+                .update(updates) \
+                .eq('id', session_id) \
+                .eq('user_id', user_id) \
+                .execute()
+            
             self.logger.debug("Session state updated", session_id=session_id)
             
         except Exception as e:
@@ -262,7 +371,16 @@ class AgentService:
                 "risk_categories": [],
                 "verdict": "CLEARED"
             },
-            "agent_response": None
+            "context_collection": {
+                "current_turn": 0,
+                "confidence_score": 0.0
+            },
+            "active_category_risk_factors": {},
+            "found_risk_factors": {},
+            "session_status": "OPEN",
+            "persona_agent_response": "",
+            "recent_memory_queue": [],
+            "agent_response": ""
         }
 
     async def health_check(self) -> Dict[str, Any]:
@@ -270,7 +388,7 @@ class AgentService:
         health_status = {
             "agent_service": "healthy",
             "adk_available": ADK_AVAILABLE,
-            "adk_runner": "initialized" if self.runner else "not_available",
+            "custom_runner": "initialized" if self.custom_runner else "not_available",
             "supabase": "healthy"
         }
         
