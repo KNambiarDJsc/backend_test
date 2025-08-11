@@ -7,7 +7,7 @@ import json
 
 SAMPLE_STATE_PATH = os.getenv(
     "SAMPLE_STATE_PATH",
-    "chat_agent/profiles/user_empty_default.json"
+    "chat/profiles/user_empty_default.json"
 )
 
 def create_risk_profile(
@@ -61,12 +61,52 @@ def create_risk_profile(
         
     return ret
 
+def update_recent_memory_queue(callback_context: CallbackContext):
+    """
+    Updates the recent memory queue in the session state.
+    Stores the latest user input and persona agent response.
+    Maintains a maximum queue length of 3 conversation turns.
+
+    Args:
+        callback_context: The callback context
+    """
+    memory = callback_context.state
+    
+    # Initialize recent_memory_queue if it doesn't exist
+    if "recent_memory_queue" not in memory:
+        memory["recent_memory_queue"] = []
+    
+    recent_memory_queue = memory["recent_memory_queue"]
+    
+    # Add new entries to the queue
+    new_entries = [
+        {
+            "role": callback_context.user_content.role,
+            "text": callback_context.user_content.parts[0].text
+        },
+        {
+            "role": "model",
+            "text": memory["persona_agent_response"]
+        }
+    ]
+    
+    # Add new entries to the queue
+    recent_memory_queue.extend(new_entries)
+    
+    # Limit the queue to the 3 most recent turns (6 entries)
+    # Each turn consists of a user message and a model response
+    if len(recent_memory_queue) > 6:
+        recent_memory_queue = recent_memory_queue[-6:]
+    
+    # Update the memory with the new queue
+    memory["recent_memory_queue"] = recent_memory_queue
+
 def _update_assessment_history(callback_context: CallbackContext):
     """
     Updates the assessment history in the memory
 
     Args:
-        callback_context (CallbackContext): _description_
+        callback_context: The callback context
     """
     memory = callback_context.state
     risk_profile = memory["risk_profile"]
@@ -88,28 +128,6 @@ def _update_assessment_history(callback_context: CallbackContext):
         }
     
     memory["risk_profile"] = risk_profile
-
-def _update_assessment_history_agent(callback_context: CallbackContext):
-    """
-    Updates the assessment history in the memory
-
-    Args:
-        callback_context (CallbackContext): _description_
-    """
-    memory = callback_context.state
-    risk_profile = memory["risk_profile"]
-    assessment_history = risk_profile["assessment_history"]
-    new_assessment_history = assessment_history + [
-        {
-            "role": callback_context.agent_content.role,
-            "text": callback_context.agent_content.parts[0].text
-        }
-    ]
-    risk_profile = { 
-            **risk_profile, 
-            "assessment_history": new_assessment_history
-        }
-    memory["risk_profile"] = risk_profile  
     
 def _set_initial_states(source: Dict[str, Any], target: State | dict[str, Any]):
     """
