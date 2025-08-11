@@ -1,0 +1,27 @@
+{
+  "state": {
+    "user_profile": {
+      "name": "Russel",
+      "grade": "12"
+    },
+    "at_risk": "False",
+    "risk_profile": {
+      "triggering_statement": "",
+      "risk_categories": [],
+      "risk_factors": [],
+      "assessment_history": [],
+      "confidence_score": 0.0,
+      "verdict": "CLEARED"
+    },
+    "context_collection": {
+      "current_turn": 0,
+      "confidence_score": 0.0
+    },
+    "active_category_risk_factors": {},
+    "found_risk_factors": {},
+    "session_status": "OPEN",
+    "persona_agent_response": "",
+    "recent_memory_queue": [],
+    "agent_response": ""
+  }
+}
