@@ -17,7 +17,7 @@ asyncio-throttle==1.0.2
 tenacity==8.2.3
 structlog==23.2.0
 
-google-adk[database]==0.3.0
+google-adk
 yfinance==0.2.56
 psutil==5.9.5
 
