@@ -3,7 +3,8 @@ import structlog
 from supabase import Client
 
 try:
-    from google.adk.agents import Runner, Agent
+    from google.adk.agents import Agent
+    from google.adk.runners import Runner
     from google.adk.sessions import SessionService, Session
     from google.adk.events import Event
     from google.genai import types
