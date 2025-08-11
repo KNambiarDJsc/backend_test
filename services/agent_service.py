@@ -5,7 +5,8 @@ import uuid
 
 # Try to import ADK components
 try:
-    from google.adk.agents import Runner
+    from google.adk.runners import Runner
+
     from google.adk.sessions import DatabaseSessionService
     from google.genai import types
     from google.adk.events import Event
